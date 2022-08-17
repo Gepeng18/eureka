@@ -1,20 +1,15 @@
 package com.netflix.discovery;
 
-import java.util.TimerTask;
-import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicLong;
-
 import com.netflix.servo.monitor.Counter;
 import com.netflix.servo.monitor.LongGauge;
 import com.netflix.servo.monitor.MonitorConfig;
 import com.netflix.servo.monitor.Monitors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.TimerTask;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A supervisor task that schedules subtasks while enforce a timeout.
@@ -48,7 +43,7 @@ public class TimedSupervisorTask extends TimerTask {
         this.timeoutMillis = timeUnit.toMillis(timeout);
         this.task = task;
         this.delay = new AtomicLong(timeoutMillis);
-        this.maxDelay = timeoutMillis * expBackOffBound;
+        this.maxDelay = timeoutMillis * expBackOffBound;  // 这就是默认最大延迟时间：30秒*10
 
         // Initialize the counters and register.
         successCounter = Monitors.newCounter("success");
@@ -63,9 +58,9 @@ public class TimedSupervisorTask extends TimerTask {
     public void run() {
         Future<?> future = null;
         try {
-            future = executor.submit(task);
+            future = executor.submit(task); // 通过该run方法执行task.run()方法
             threadPoolLevelGauge.set((long) executor.getActiveCount());
-            future.get(timeoutMillis, TimeUnit.MILLISECONDS);  // block until done or timeout
+            future.get(timeoutMillis, TimeUnit.MILLISECONDS);  // 阻塞该run()方法直到task.run()执行完或超时
             delay.set(timeoutMillis);
             threadPoolLevelGauge.set((long) executor.getActiveCount());
             successCounter.increment();
@@ -74,7 +69,7 @@ public class TimedSupervisorTask extends TimerTask {
             timeoutCounter.increment();
 
             long currentDelay = delay.get();
-            long newDelay = Math.min(maxDelay, currentDelay * 2);
+            long newDelay = Math.min(maxDelay, currentDelay * 2);  // 如果报超时异常，超时时间*2
             delay.compareAndSet(currentDelay, newDelay);
 
         } catch (RejectedExecutionException e) {
@@ -94,6 +89,7 @@ public class TimedSupervisorTask extends TimerTask {
 
             throwableCounter.increment();
         } finally {
+            // 取消future，然后如果没有shutdown，就把任务扔进线程池继续执行
             if (future != null) {
                 future.cancel(true);
             }

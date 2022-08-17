@@ -16,23 +16,6 @@
 
 package com.netflix.discovery.shared.transport.jersey2;
 
-import javax.ws.rs.client.Client;
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.client.Invocation.Builder;
-import javax.ws.rs.client.WebTarget;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.MultivaluedMap;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
-
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.appinfo.InstanceInfo.InstanceStatus;
 import com.netflix.discovery.shared.Application;
@@ -44,6 +27,22 @@ import com.netflix.discovery.util.StringUtil;
 import org.glassfish.jersey.client.authentication.HttpAuthenticationFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.ws.rs.client.Client;
+import javax.ws.rs.client.Entity;
+import javax.ws.rs.client.Invocation.Builder;
+import javax.ws.rs.client.WebTarget;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.MultivaluedMap;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.Response.Status;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 
 import static com.netflix.discovery.shared.transport.EurekaHttpResponse.anEurekaHttpResponse;
 
@@ -81,8 +80,12 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
         this.password = localPassword;
     }
 
+    /**
+     * eureka client向Server注册，实际就是向Server发送了一次post请求
+     */
     @Override
     public EurekaHttpResponse<Void> register(InstanceInfo info) {
+        // 注册时，携带application name
         String urlPath = "apps/" + info.getAppName();
         Response response = null;
         try {
@@ -92,7 +95,7 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
             response = resourceBuilder
                     .accept(MediaType.APPLICATION_JSON)
                     .acceptEncoding("gzip")
-                    .post(Entity.json(info));
+                    .post(Entity.json(info)); // post请求，并携带 instanceInfo
             return anEurekaHttpResponse(response.getStatus()).headers(headersOf(response)).build();
         } finally {
             if (logger.isDebugEnabled()) {
@@ -249,9 +252,14 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
         }
     }
 
+    /**
+     * eureka client获取全量注册表，实际就是向Server发送了一次get请求
+     */
     private EurekaHttpResponse<Applications> getApplicationsInternal(String urlPath, String[] regions) {
         Response response = null;
         try {
+            // jerseyClient 具体连到哪台机器呢？就是将所有的defaultZone打散，然后随机选择一个直连
+            // 【基本上各种中间件，如果服务端是集群，client连接都是采取这种方式，为了保证负载均衡】
             WebTarget webTarget = jerseyClient.target(serviceUrl).path(urlPath);
             if (regions != null && regions.length > 0) {
                 webTarget = webTarget.queryParam("regions", StringUtil.join(regions));
@@ -259,12 +267,13 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
             Builder requestBuilder = webTarget.request();
             addExtraProperties(requestBuilder);
             addExtraHeaders(requestBuilder);
-            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get();
+            response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get(); // get()的意思是提交get请求
 
             Applications applications = null;
             if (response.getStatus() == Status.OK.getStatusCode() && response.hasEntity()) {
                 applications = response.readEntity(Applications.class);
             }
+            // 封装成eureka client需要的对象
             return anEurekaHttpResponse(response.getStatus(), applications).headers(headersOf(response)).build();
         } finally {
             if (logger.isDebugEnabled()) {

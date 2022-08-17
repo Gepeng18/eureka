@@ -15,15 +15,6 @@
  */
 package com.netflix.appinfo;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedHashSet;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Function;
-
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -41,6 +32,10 @@ import com.thoughtworks.xstream.annotations.XStreamOmitField;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+
 /**
  * The class that holds information required for registration with
  * <tt>Eureka Server</tt> and to be discovered by other components.
@@ -48,6 +43,8 @@ import org.slf4j.LoggerFactory;
  * <code>@Auto</code> annotated fields are serialized as is; Other fields are
  * serialized as specified by the <code>@Serializer</code>.
  * </p>
+ * InstanceInfo 中存放着注册到 eureka Server的注册信息
+ * 一个instanceInfo代表一个主机 = 一个provider
  *
  * @author Karthik Ranganathan, Greg Kim
  */
@@ -146,9 +143,9 @@ public class InstanceInfo {
     @XStreamAlias("metadata")
     private volatile Map<String, String> metadata;
     @Auto
-    private volatile Long lastUpdatedTimestamp;
+    private volatile Long lastUpdatedTimestamp; // 微服务信息在服务端最后一次被修改的时间
     @Auto
-    private volatile Long lastDirtyTimestamp;
+    private volatile Long lastDirtyTimestamp; // 微服务信息在客户端最后一次被修改的时间
     @Auto
     private volatile ActionType actionType;
     @Auto
