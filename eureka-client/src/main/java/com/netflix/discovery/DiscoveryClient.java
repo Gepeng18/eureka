@@ -1136,8 +1136,9 @@ public class DiscoveryClient implements EurekaClient {
             String reconcileHashCode = "";
             if (fetchRegistryUpdateLock.tryLock()) {
                 try {
-                    // 将发生变化的entity保存到本地缓存，
+                    // 将从Server获取到的所有变更信息更新到本地缓存，这些变更信息来自两类region
                     // 缓存两大类数据：1. 当前客户端所在region的Server（本地region） 2. 其他region的Server（远程region）
+                    // 而本地缓存也分为两类，缓存本地region的applications与缓存所有远程regions的注册信息的map(key为远程region，value为该远程region的applications)
                     updateDelta(delta);
                     reconcileHashCode = getReconcileHashCode(applications);
                 } finally {
@@ -1224,35 +1225,45 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
-     * Updates the delta information fetches from the eureka server into the
-     * local cache.
+     * Updates the delta information fetches from the eureka server into the local cache.
+     * 从 Eureka Server 获取数据来更新 client 的 local cache
      *
      * @param delta
-     *            the delta information received from eureka server in the last
-     *            poll cycle.
+     *    the delta information received from eureka server in the last poll cycle.
+     *    delta是所有发生变化的实例信息
      */
     private void updateDelta(Applications delta) {
         int deltaCount = 0;
+        // 就是遍历 applications中 Map<String, Application> 的values
         for (Application app : delta.getRegisteredApplications()) {
             for (InstanceInfo instance : app.getInstances()) {
+                // 获取本地region的applications
                 Applications applications = getApplications();
+                // 获取instance的region，因为本地region和其他region是分开存储的
                 String instanceRegion = instanceRegionChecker.getInstanceRegion(instance);
                 if (!instanceRegionChecker.isLocalRegion(instanceRegion)) {
+                    // 如果不是本地region，则从远程region的缓存获取
                     Applications remoteApps = remoteRegionVsApps.get(instanceRegion);
                     if (null == remoteApps) {
                         remoteApps = new Applications();
                         remoteRegionVsApps.put(instanceRegion, remoteApps);
                     }
                     applications = remoteApps;
+                    // 代码运行到这里，当instanceRegion是本地，则applications代表本地region，
+                    // 当instanceRegion是远程，则applications代表远程region的applications（即远程region）
                 }
 
                 ++deltaCount;
+                // 判断instance的变更类型
                 if (ActionType.ADDED.equals(instance.getActionType())) {
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
                     if (existingApp == null) {
+                        // 这里感觉是instance如果是本地，则把application也当做本地加到本地applications中
+                        // 这里感觉是instance如果是远程，则把application也当做远程加到远程applications中
                         applications.addApplication(app);
                     }
                     logger.debug("Added instance {} to the existing apps in region {}", instance.getId(), instanceRegion);
+                    // 将instance加到application，再加到applications中
                     applications.getRegisteredApplications(instance.getAppName()).addInstance(instance);
                 } else if (ActionType.MODIFIED.equals(instance.getActionType())) {
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
@@ -1261,10 +1272,13 @@ public class DiscoveryClient implements EurekaClient {
                     }
                     logger.debug("Modified instance {} to the existing apps ", instance.getId());
 
+                    // 这里可以看一下addInstance，是先删除，再add，很奇怪啊？为啥这样做呢？
+                    // remove是remove掉和入参一样的instanceId的数据，然后加了一个新的数据（这里注意，instanceInfo除了instanceId外还有其他字段）
                     applications.getRegisteredApplications(instance.getAppName()).addInstance(instance);
 
                 } else if (ActionType.DELETED.equals(instance.getActionType())) {
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
+                    // 空的时候，什么都不做，不空则删除instance
                     if (existingApp != null) {
                         logger.debug("Deleted instance {} to the existing apps ", instance.getId());
                         existingApp.removeInstance(instance);
@@ -1272,6 +1286,7 @@ public class DiscoveryClient implements EurekaClient {
                          * We find all instance list from application(The status of instance status is not only the status is UP but also other status)
                          * if instance list is empty, we remove the application.
                          */
+                        // 如果application空了，则把application从applications中删除
                         if (existingApp.getInstancesAsIsFromEureka().isEmpty()) {
                             applications.removeApplication(existingApp);
                         }

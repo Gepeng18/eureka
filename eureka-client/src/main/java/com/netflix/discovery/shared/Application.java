@@ -16,19 +16,6 @@
 
 package com.netflix.discovery.shared;
 
-import javax.annotation.Nullable;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicReference;
-
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -42,6 +29,11 @@ import com.netflix.discovery.util.StringCache;
 import com.thoughtworks.xstream.annotations.XStreamAlias;
 import com.thoughtworks.xstream.annotations.XStreamImplicit;
 import com.thoughtworks.xstream.annotations.XStreamOmitField;
+
+import javax.annotation.Nullable;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The application class holds the list of instances for a particular
@@ -70,11 +62,11 @@ public class Application {
     private volatile boolean isDirty = false;
 
     @XStreamImplicit
-    private final Set<InstanceInfo> instances;
+    private final Set<InstanceInfo> instances; // instancesMap的set版本
 
     private final AtomicReference<List<InstanceInfo>> shuffledInstances;
 
-    private final Map<String, InstanceInfo> instancesMap;
+    private final Map<String, InstanceInfo> instancesMap; // instances的map版本
 
     public Application() {
         instances = new LinkedHashSet<InstanceInfo>();
