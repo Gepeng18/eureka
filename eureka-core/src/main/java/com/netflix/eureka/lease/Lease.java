@@ -36,12 +36,13 @@ public class Lease<T> {
         Register, Cancel, Renew
     };
 
+    // 90秒没心跳，Server就认为Client挂了
     public static final int DEFAULT_DURATION_IN_SECS = 90;
 
     private T holder;
-    private long evictionTimestamp;
-    private long registrationTimestamp;
-    private long serviceUpTimestamp;
+    private long evictionTimestamp;  // 删除的时间戳
+    private long registrationTimestamp; // 注册的时间戳
+    private long serviceUpTimestamp; // 服务启动的时间戳
     // Make it volatile so that the expiration task would see this quicker
     private volatile long lastUpdateTimestamp;
     private long duration;

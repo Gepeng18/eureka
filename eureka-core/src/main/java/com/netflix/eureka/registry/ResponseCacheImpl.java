@@ -16,28 +16,9 @@
 
 package com.netflix.eureka.registry;
 
-import javax.annotation.Nullable;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Date;
-import java.util.List;
-import java.util.TimerTask;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.zip.GZIPOutputStream;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-import com.google.common.cache.RemovalListener;
-import com.google.common.cache.RemovalNotification;
+import com.google.common.cache.*;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.netflix.appinfo.EurekaAccept;
@@ -56,6 +37,17 @@ import com.netflix.servo.monitor.Stopwatch;
 import com.netflix.servo.monitor.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * The class that is responsible for caching registry information that will be
@@ -154,8 +146,9 @@ public class ResponseCacheImpl implements ResponseCache {
                             }
                         });
 
+        // 配置文件中的一个配置
         if (shouldUseReadOnlyResponseCache) {
-            // 定义并开启了一个定时任务，用于定时从readWriteCacheMap中更新readOnlyCacheMap中的数据
+            // 定义并开启了一个定时任务（定时执行），用于定时从readWriteCacheMap中更新readOnlyCacheMap中的数据
             timer.schedule(getCacheUpdateTask(),
                     new Date(((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)
                             + responseCacheUpdateIntervalMs),
@@ -237,7 +230,7 @@ public class ResponseCacheImpl implements ResponseCache {
      *         applications.
      */
     public byte[] getGZIP(Key key) {
-        // 获取负载
+        // 获取负载，其中shouldUseReadOnlyResponseCache也是Server端的一个配置参数，默认是true
         Value payload = getValue(key, shouldUseReadOnlyResponseCache);
         if (payload == null) {
             return null;
@@ -357,6 +350,8 @@ public class ResponseCacheImpl implements ResponseCache {
 
     /**
      * Get the payload in both compressed and uncompressed form.
+     * 一旦放到只读缓存里面了，只要在这个缓存中不过期，就依靠定时任务进行定时从读写缓存中更新到只读缓存
+     * 如果只读缓存中没有，则定时任务不会进行定时更新
      */
     @VisibleForTesting
     Value getValue(final Key key, boolean useReadOnlyCache) {
@@ -368,9 +363,9 @@ public class ResponseCacheImpl implements ResponseCache {
                 if (currentPayload != null) {
                     payload = currentPayload;
                 } else {
-                    // 从读写缓存map中获取
+                    // 从读写缓存map中获取（读写缓存map是最新的数据）
                     payload = readWriteCacheMap.get(key);
-                    // 将该值再放入到只读缓存map中
+                    // 将该值再放入到只读缓存map中（只读缓存map是旧数据）
                     readOnlyCacheMap.put(key, payload);
                 }
             } else {

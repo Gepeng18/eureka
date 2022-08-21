@@ -16,16 +16,16 @@
 
 package com.netflix.appinfo;
 
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 import com.netflix.appinfo.InstanceInfo.InstanceStatus;
 import com.netflix.appinfo.providers.EurekaConfigBasedInstanceInfoProvider;
 import com.netflix.discovery.StatusChangeEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.inject.Inject;
+import javax.inject.Singleton;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The class that initializes information required for registration with
@@ -196,6 +196,8 @@ public class ApplicationInfoManager {
      * server on next heartbeat.
      *
      * see {@link InstanceInfo#getHostName()} for explanation on why the hostname is used as the default address
+     *
+     * 和数据中心有关，而数据中心一般不使用
      */
     public void refreshDataCenterInfoIfRequired() {
         String existingAddress = instanceInfo.getHostName();
@@ -250,9 +252,16 @@ public class ApplicationInfoManager {
         if (leaseInfo == null) {
             return;
         }
-        int currentLeaseDuration = config.getLeaseExpirationDurationInSeconds();
-        int currentLeaseRenewal = config.getLeaseRenewalIntervalInSeconds();
+        int currentLeaseDuration = config.getLeaseExpirationDurationInSeconds(); // 如果服务端90秒接收不到心跳，就认为本client挂了
+        int currentLeaseRenewal = config.getLeaseRenewalIntervalInSeconds();   // 30秒发送一次心跳
+        // 如果本地缓存的和配置文件的不一样，则将配置文件中的内容放到本地缓存中（instanceInfo就是本地缓存）
         if (leaseInfo.getDurationInSecs() != currentLeaseDuration || leaseInfo.getRenewalIntervalInSecs() != currentLeaseRenewal) {
+            // 这是迭代稳定性的一个变种
+            // 迭代稳定性：一般情况下，对于多线程操作的共享数组/集合，我们在对其元素进行修改操作时，不要直接对该数组/集合进行操作，
+            // 而是重新创建一个临时的数组/集合，将原数组/集合中的数据复制给临时数组/集合，然后再对这个临时数组/集合执行修改操作。
+            // 执行完毕后再将临时数组/集合赋值给原数组/集合。这个操作是为了保证 迭代稳定性。当然，这里的操作要保证互斥（加锁)。
+            // 比如有一堆线程在读一个Map，而有个线程再写这个map，不断往里面put，那那些读线程可能会读错（读到脏数据，或者读直接出错了）。
+            // 这里可以看到，leaseInfo、isInstanceInfoDirty、lastDirtyTimestamp 都加了 volatile 属性
             LeaseInfo newLeaseInfo = LeaseInfo.Builder.newBuilder()
                     .setRenewalIntervalInSecs(currentLeaseRenewal)
                     .setDurationInSecs(currentLeaseDuration)

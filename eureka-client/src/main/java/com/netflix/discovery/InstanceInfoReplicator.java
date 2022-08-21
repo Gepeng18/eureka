@@ -56,6 +56,8 @@ class InstanceInfoReplicator implements Runnable {
         this.replicationIntervalSeconds = replicationIntervalSeconds;
         this.burstSize = burstSize;
 
+        // 允许一分钟查看4次配置文件是否更改
+        // 听视频中说，有两种方式检查配置文件是否更新：1. 每30秒检测一次 2. 配置文件一改，就检测（这种方式不能超过4次，怎么做的呢）
         this.allowedRatePerMinute = 60 * this.burstSize / this.replicationIntervalSeconds;
         logger.info("InstanceInfoReplicator onDemand update allowed rate per min is {}", allowedRatePerMinute);
     }
@@ -85,8 +87,10 @@ class InstanceInfoReplicator implements Runnable {
     }
 
     public boolean onDemandUpdate() {
+        // 限流，担心Client更新频率过高
         if (rateLimiter.acquire(burstSize, allowedRatePerMinute)) {
             if (!scheduler.isShutdown()) {
+                // 提交一个run
                 scheduler.submit(new Runnable() {
                     @Override
                     public void run() {
@@ -95,9 +99,16 @@ class InstanceInfoReplicator implements Runnable {
                         Future latestPeriodic = scheduledPeriodicRef.get();
                         if (latestPeriodic != null && !latestPeriodic.isDone()) {
                             logger.debug("Canceling the latest scheduled update, it will be rescheduled at the end of on demand update");
+                            // 取消之前的定时任务，然后调用下面的run()重新进行定时任务的启动，简单来说，就是一开始把30秒定时更新任务和配置文件监听器都启动，
+                            // 然后一旦配置文件监听器被触发了，就把之前的定时任务取消了，然后重新启动一个定时任务
                             latestPeriodic.cancel(false);
                         }
-    
+                        /**
+                         * 这里有个问题，onDemandUpdate()是按需进行更新，具体实现为监听配置文件发生变化时，调用run()方法
+                         * 而调用的run()方法中，执行一次结束后，会再次把任务放到线程池中30秒定时更新一次，那就有问题了，理论上来说，
+                         * onDemandUpdate()并不需要这种方式，只需要执行一次，不需要后续30秒执行一次？
+                         * 答案就在上面的 latestPeriodic 变量
+                         */
                         InstanceInfoReplicator.this.run();
                     }
                 });
@@ -114,16 +125,21 @@ class InstanceInfoReplicator implements Runnable {
 
     public void run() {
         try {
+            // 如果配置文件的续约相关配置改了，则setIsDirty()
             discoveryClient.refreshInstanceInfo();
 
+            // 当配置文件发生了变更，就会把isInstanceInfoDirty置为true，并且设置lastDirtyTimestamp，
+            // 此时client就会发送注册请求
             Long dirtyTimestamp = instanceInfo.isDirtyWithTime();
             if (dirtyTimestamp != null) {
                 discoveryClient.register();
+                // 注册完，服务端和客户端的instanceInfo数据一样了，就不脏了
                 instanceInfo.unsetIsDirty(dirtyTimestamp);
             }
         } catch (Throwable t) {
             logger.warn("There was a problem with the instance info replicator", t);
         } finally {
+            // 又启动任务了
             Future next = scheduler.schedule(this, replicationIntervalSeconds, TimeUnit.SECONDS);
             scheduledPeriodicRef.set(next);
         }

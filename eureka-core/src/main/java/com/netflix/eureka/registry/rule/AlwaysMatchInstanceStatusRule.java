@@ -19,6 +19,8 @@ public class AlwaysMatchInstanceStatusRule implements InstanceStatusOverrideRule
                                       boolean isReplication) {
         logger.debug("Returning the default instance status {} for instance {}", instanceInfo.getStatus(),
                 instanceInfo.getId());
+        // 直接使用外来的status，为什么这样呢？因为服务端已经是known了，且client传来的是up或者outOfService（第一个rule过滤了其他情况），
+        // 这时候服务端认了，返回结果不是up就是outOfService
         return StatusOverrideResult.matchingStatus(instanceInfo.getStatus());
     }
 

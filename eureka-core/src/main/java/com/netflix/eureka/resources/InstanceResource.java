@@ -16,13 +16,15 @@
 
 package com.netflix.eureka.resources;
 
-import javax.ws.rs.DELETE;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
+import com.netflix.appinfo.InstanceInfo;
+import com.netflix.appinfo.InstanceInfo.InstanceStatus;
+import com.netflix.eureka.EurekaServerConfig;
+import com.netflix.eureka.cluster.PeerEurekaNode;
+import com.netflix.eureka.registry.PeerAwareInstanceRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.ws.rs.*;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MultivaluedMap;
 import javax.ws.rs.core.Response;
@@ -34,14 +36,6 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-
-import com.netflix.appinfo.InstanceInfo;
-import com.netflix.appinfo.InstanceInfo.InstanceStatus;
-import com.netflix.eureka.EurekaServerConfig;
-import com.netflix.eureka.registry.PeerAwareInstanceRegistry;
-import com.netflix.eureka.cluster.PeerEurekaNode;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * A <em>jersey</em> resource that handles operations for a particular instance.
@@ -112,13 +106,15 @@ public class InstanceResource {
         boolean isSuccess = registry.renew(app.getName(), id, isFromReplicaNode);
 
         // Not found in the registry, immediately ask for a register
+        // 默认情况下，客户端是先续约，服务端如果没有找到，返回not_found，然后客户端再注册
         if (!isSuccess) {
             logger.warn("Not Found (Renew): {} - {}", app.getName(), id);
             return Response.status(Status.NOT_FOUND).build();
         }
-        // Check if we need to sync based on dirty time stamp, the client
-        // instance might have changed some value
+        // Check if we need to sync based on dirty time stamp, the client instance might have changed some value
+        // 是否需要基于dirtyTimeStamp做同步（Server和Server之间dirtyTimeStamp不一样时，是否需要进行同步）
         Response response;
+        // 默认 shouldSyncWhenTimestampDiffers 配置的是ture
         if (lastDirtyTimestamp != null && serverConfig.shouldSyncWhenTimestampDiffers()) {
             response = this.validateDirtyTimestamp(Long.valueOf(lastDirtyTimestamp), isFromReplicaNode);
             // Store the overridden status since the validation found out the node that replicates wins
@@ -126,6 +122,7 @@ public class InstanceResource {
                     && (overriddenStatus != null)
                     && !(InstanceStatus.UNKNOWN.name().equals(overriddenStatus))
                     && isFromReplicaNode) {
+                // Server复制的时候，发现不同步了（dirtyTimeStamp不一样了），则额外进行同步
                 registry.storeOverriddenStatusIfRequired(app.getAppName(), id, InstanceStatus.valueOf(overriddenStatus));
             }
         } else {
@@ -159,13 +156,16 @@ public class InstanceResource {
     @Path("status")
     public Response statusUpdate(
             @QueryParam("value") String newStatus,
+            // isReplication 参数是为了区别是 client提交给Server的请求还是Server之间的replica复制
             @HeaderParam(PeerEurekaNode.HEADER_REPLICATION) String isReplication,
             @QueryParam("lastDirtyTimestamp") String lastDirtyTimestamp) {
         try {
+            // 先从Server注册表中看appName对应的instanceId有没有instanceInfo
             if (registry.getInstanceByAppAndId(app.getName(), id) == null) {
                 logger.warn("Instance not found: {}/{}", app.getName(), id);
                 return Response.status(Status.NOT_FOUND).build();
             }
+            // 状态修改，调用的是 PeerAwareInstanceRegistryImpl
             boolean isSuccess = registry.statusUpdate(app.getName(), id,
                     InstanceStatus.valueOf(newStatus), lastDirtyTimestamp,
                     "true".equals(isReplication));
@@ -299,25 +299,32 @@ public class InstanceResource {
                                             boolean isReplication) {
         InstanceInfo appInfo = registry.getInstanceByAppAndId(app.getName(), id, false);
         if (appInfo != null) {
+            // 其他Server传来的lastDirtyTimestamp和我自己注册表里的lastDirtyTimestamp不一样
             if ((lastDirtyTimestamp != null) && (!lastDirtyTimestamp.equals(appInfo.getLastDirtyTimestamp()))) {
                 Object[] args = {id, appInfo.getLastDirtyTimestamp(), lastDirtyTimestamp, isReplication};
 
                 if (lastDirtyTimestamp > appInfo.getLastDirtyTimestamp()) {
+                    // 外来的大，说明外来的新，说明需要同步
                     logger.debug(
                             "Time to sync, since the last dirty timestamp differs -"
                                     + " ReplicationInstance id : {},Registry : {} Incoming: {} Replication: {}",
                             args);
+                    // 返回not_found为了让外层函数执行同步操作
                     return Response.status(Status.NOT_FOUND).build();
                 } else if (appInfo.getLastDirtyTimestamp() > lastDirtyTimestamp) {
+                    // 外来的小，说明外来的旧
                     // In the case of replication, send the current instance info in the registry for the
                     // replicating node to sync itself with this one.
                     if (isReplication) {
+                        // 外来的小，如果是Server间的复制，则表明有问题，视频中说出现了递归，这时候返回CONFLICT
                         logger.debug(
                                 "Time to sync, since the last dirty timestamp differs -"
                                         + " ReplicationInstance id : {},Registry : {} Incoming: {} Replication: {}",
                                 args);
                         return Response.status(Status.CONFLICT).entity(appInfo).build();
                     } else {
+                        // client上报Server，出现了外来的小，即client的小，我去，为啥会出现这种情况呢？
+                        // 只有一种可能性，client连续修改了两次，上报了两次，由于时序问题，先上报的请求后到，才会出现这种问题
                         return Response.ok().build();
                     }
                 }

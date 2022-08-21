@@ -37,8 +37,8 @@ import com.thoughtworks.xstream.annotations.XStreamOmitField;
 @JsonRootName("leaseInfo")
 public class LeaseInfo {
 
-    public static final int DEFAULT_LEASE_RENEWAL_INTERVAL = 30;
-    public static final int DEFAULT_LEASE_DURATION = 90;
+    public static final int DEFAULT_LEASE_RENEWAL_INTERVAL = 30; // client每30秒发送一次心跳
+    public static final int DEFAULT_LEASE_DURATION = 90; // 90秒没收到心跳，则认为该client挂了-
 
     // Client settings
     private int renewalIntervalInSecs = DEFAULT_LEASE_RENEWAL_INTERVAL;

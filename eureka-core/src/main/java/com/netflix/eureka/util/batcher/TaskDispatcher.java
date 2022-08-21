@@ -14,6 +14,8 @@ package com.netflix.eureka.util.batcher;
  * method. Batched executor is created by {@link TaskDispatchers#createBatchingTaskDispatcher(String, int, int, int, long, long, TaskProcessor)}.
  *
  * @author Tomasz Bak
+ *
+ * do 相当于线程池
  */
 public interface TaskDispatcher<ID, T> {
 

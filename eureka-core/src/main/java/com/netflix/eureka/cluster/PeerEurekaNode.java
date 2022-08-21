@@ -16,9 +16,6 @@
 
 package com.netflix.eureka.cluster;
 
-import java.net.MalformedURLException;
-import java.net.URL;
-
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.appinfo.InstanceInfo.InstanceStatus;
 import com.netflix.discovery.shared.transport.EurekaHttpResponse;
@@ -31,6 +28,9 @@ import com.netflix.eureka.util.batcher.TaskDispatcher;
 import com.netflix.eureka.util.batcher.TaskDispatchers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.net.MalformedURLException;
+import java.net.URL;
 
 /**
  * The <code>PeerEurekaNode</code> represents a peer node to which information
@@ -194,11 +194,13 @@ public class PeerEurekaNode {
     public void heartbeat(final String appName, final String id,
                           final InstanceInfo info, final InstanceStatus overriddenStatus,
                           boolean primeConnection) throws Throwable {
+        // 如果是第一次连接
         if (primeConnection) {
-            // We do not care about the result for priming request.
+            // We do not care about the result for priming request.（我们不关心第一次请求的结果）
             replicationClient.sendHeartBeat(appName, id, info, overriddenStatus);
             return;
         }
+        // 不是第一次，则定义一个任务，并执行
         ReplicationTask replicationTask = new InstanceReplicationTask(targetHost, Action.Heartbeat, info, overriddenStatus, false) {
             @Override
             public EurekaHttpResponse<InstanceInfo> execute() throws Throwable {
@@ -269,6 +271,7 @@ public class PeerEurekaNode {
     public void statusUpdate(final String appName, final String id,
                              final InstanceStatus newStatus, final InstanceInfo info) {
         long expiryTime = System.currentTimeMillis() + maxProcessingDelayMs;
+        // 表示InstanceReplicationTask必须在expiryTime之前执行完成，否则就算过期了
         batchingDispatcher.process(
                 taskId("statusUpdate", appName, id),
                 new InstanceReplicationTask(targetHost, Action.StatusUpdate, info, null, false) {

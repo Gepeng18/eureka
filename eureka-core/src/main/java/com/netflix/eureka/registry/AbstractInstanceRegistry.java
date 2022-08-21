@@ -16,31 +16,6 @@
 
 package com.netflix.eureka.registry;
 
-import javax.annotation.Nullable;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.util.AbstractQueue;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Random;
-import java.util.Set;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-
 import com.google.common.cache.CacheBuilder;
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.appinfo.InstanceInfo.ActionType;
@@ -58,6 +33,17 @@ import com.netflix.eureka.util.MeasuredRate;
 import com.netflix.servo.annotations.DataSourceType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.*;
+import java.util.Map.Entry;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import static com.netflix.eureka.util.EurekaMonitors.*;
 
@@ -77,6 +63,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     private static final Logger logger = LoggerFactory.getLogger(AbstractInstanceRegistry.class);
 
     private static final String[] EMPTY_STR_ARRAY = new String[0];
+    // 服务端注册表<appName, <instanceId, Lease>>
     private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry
             = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
     protected Map<String, RemoteRegionRegistry> regionNameVSRemoteRegistry = new HashMap<String, RemoteRegionRegistry>();
@@ -192,6 +179,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
      * @see com.netflix.eureka.lease.LeaseManager#register(java.lang.Object, int, boolean)
      */
     public void register(InstanceInfo registrant, int leaseDuration, boolean isReplication) {
+        // 写操作加读锁
         read.lock();
         try {
             Map<String, Lease<InstanceInfo>> gMap = registry.get(registrant.getAppName());
@@ -203,46 +191,81 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                     gMap = gNewMap;
                 }
             }
+            // 这里是注册函数啊，为啥会获取到existingLease啊？注册应该是不存在啊
+            // 这里可以看一下PDF中client提交register()的第三种情况，配置信息发生变更后，client还会进行register()
             Lease<InstanceInfo> existingLease = gMap.get(registrant.getId());
             // Retain the last dirty timestamp without overwriting it, if there is already a lease
             if (existingLease != null && (existingLease.getHolder() != null)) {
+                // 注册表里面 lastDirtyTimestamp（只有一种情况lastDirtyTimestamp会发生变更，即client端配置文件发生变更）
                 Long existingLastDirtyTimestamp = existingLease.getHolder().getLastDirtyTimestamp();
+                // registrant 是外来的
                 Long registrationLastDirtyTimestamp = registrant.getLastDirtyTimestamp();
                 logger.debug("Existing lease found (existing={}, provided={}", existingLastDirtyTimestamp, registrationLastDirtyTimestamp);
 
                 // this is a > instead of a >= because if the timestamps are equal, we still take the remote transmitted
                 // InstanceInfo instead of the server local copy.
+                // 注册表里面的 > 外来的？为什么会有这种情况吗？
+                // 答：网络延迟，连续修改两次配置文件，会发送两次注册请求，第一次注册在第二次注册之后到达，
+                // 那对于第一次注册请求，就存在这种情况，所以这时候注册表里面的才是最新的
                 if (existingLastDirtyTimestamp > registrationLastDirtyTimestamp) {
                     logger.warn("There is an existing lease and the existing lease's dirty timestamp {} is greater" +
                             " than the one that is being registered {}", existingLastDirtyTimestamp, registrationLastDirtyTimestamp);
                     logger.warn("Using the existing instanceInfo instead of the new instanceInfo as the registrant");
+                    // 注册表里面的数据赋值给外来的
                     registrant = existingLease.getHolder();
                 }
             } else {
+                // 真正的注册（之前没有这个instanceInfo）
                 // The lease does not exist and hence it is a new registration
                 synchronized (lock) {
+                    // expectedNumberOfClientsSendingRenews 是配置文件的一个属性，期望发送续约的客户端数量，默认是1
+                    // 表示
                     if (this.expectedNumberOfClientsSendingRenews > 0) {
                         // Since the client wants to register it, increase the number of clients sending renews
+                        // expectedNumberOfClientsSendingRenews 为配置文件中的默认值+现存client的数量，因为每来一个client，则+1
                         this.expectedNumberOfClientsSendingRenews = this.expectedNumberOfClientsSendingRenews + 1;
+                        // 客户端数量发生了变化，所以renew阈值需要重新计算
+                        // 当阈值越大，越容易开启自我保护机制（只有当每分钟心跳数量<阈值，才会开启自我保护机制，
+                        // 一旦自我保护机制开启了，那么就将当前Server保护了起来，即当前server注册表中的所有client均不
+                        // 会过期，即当client没有指定时间内（默认90秒）发送续约，也不会将其从注册表中删除。为什么？就
+                        // 是为了保证server的可用性，即保证AP）
                         updateRenewsPerMinThreshold();
                     }
                 }
                 logger.debug("No previous lease information found; it is new registration");
             }
+            // 本地的up时间更新外来的up时间(外来的是instanceInfo是最新的啊，为啥用老的info里面的up时间替换更新的info里面的up时间)
             Lease<InstanceInfo> lease = new Lease<InstanceInfo>(registrant, leaseDuration);
             if (existingLease != null) {
                 lease.setServiceUpTimestamp(existingLease.getServiceUpTimestamp());
             }
+            // 写到注册表里面
             gMap.put(registrant.getId(), lease);
+            // 这个队列没用上，不关心
             recentRegisteredQueue.add(new Pair<Long, String>(
                     System.currentTimeMillis(),
                     registrant.getAppName() + "(" + registrant.getId() + ")"));
             // This is where the initial state transfer of overridden status happens
+            // 为什么有这个判断，新注册的 overriddenStatus 不能等于 unknown，正常来说，注册的请求应该是unknown啊，
+            // 因为instanceInfo中的overriddenStatus默认值就是unknown，既然有这个if条件，说明这里需要判断的是，
+            // 当client的配置信息发生了变更，提交register()这种情况，并且之前还没发生过状态变更
+            // 因为有这样一种场景：client一开始发送注册请求，然后又发送了状态修改请求outOfService，此时Server端的overideenStatus是outOfService
+            // 然后client从Server每30秒同步一次数据，此时client的overideenStatus也变成outOfService
+            // 此时client端如果配置文件发生变化，发起register()（overriddenStatus只要不是down状态，就可以进行register()），会以outOfService的overriddenStatus发给Server
+            // 第一次注册时，一定是unknown，后面如果发生过状态删除，也会恢复成默认值unknown，然后如果发起register()，也是unknown
+            // 所以这个判断条件就表明，一定不是第一次注册
             if (!InstanceStatus.UNKNOWN.equals(registrant.getOverriddenStatus())) {
                 logger.debug("Found overridden status {} for instance {}. Checking to see if needs to be add to the "
                                 + "overrides", registrant.getOverriddenStatus(), registrant.getId());
+                // 这里考虑一种情况，就是如果client发送注册请求-修改状态-注册请求时，在第二次发送注册请求时，如果管理员手工通过Server修改client状态为up（表示管理员想把这个client拉起来）
+                // 这时候，管理员修改后，overriddenInstanceStatusMap里面就有值了，client进行第二次注册的时候，是不能把overriddenInstanceStatusMap改了的
+                // 如果改了，就相当于覆盖了管理员的操作。并且，既然Client中的值是outOfService，表明这是个很老的值，一定在管理员修改Up之前
+                // （如果在管理员修改之后，那client肯定还会定时拉值，client端肯定不会是outOfService，所以在管理员之前），再次注册时，
+                // client会带着这个很老的值过来，并且有可能会把管理员新的操作给覆盖，这肯定不能接收。理论上，当admin修改Server状态为up后，
+                // 由于client会定时拉取，将client的overriddenStatus同步为Up
                 if (!overriddenInstanceStatusMap.containsKey(registrant.getId())) {
                     logger.info("Not found overridden id {} and hence adding it", registrant.getId());
+                    // 把外来的放到map中（以外来的为准）
                     overriddenInstanceStatusMap.put(registrant.getId(), registrant.getOverriddenStatus());
                 }
             }
@@ -254,13 +277,14 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
             // Set the status based on the overridden status rules
             InstanceStatus overriddenInstanceStatus = getOverriddenInstanceStatus(registrant, existingLease, isReplication);
+            // overriddenInstanceStatus如果是up，代表别人就可以服务发现了；如果是outOfService，就无法服务发现了
             registrant.setStatusWithoutDirty(overriddenInstanceStatus);
 
             // If the lease is registered with UP status, set lease service up timestamp
             if (InstanceStatus.UP.equals(registrant.getStatus())) {
                 lease.serviceUp();
             }
-            registrant.setActionType(ActionType.ADDED);
+            registrant.setActionType(ActionType.ADDED); // 写到注册表
             recentlyChangedQueue.add(new RecentlyChangedItem(lease));
             registrant.setLastUpdatedTimestamp();
             invalidateCache(registrant.getAppName(), registrant.getVIPAddress(), registrant.getSecureVipAddress());
@@ -297,6 +321,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
      */
     // 处理服务下架请求
     protected boolean internalCancel(String appName, String id, boolean isReplication) {
+        // 写操作加了读锁
         read.lock();
         try {
             CANCEL.increment(isReplication);
@@ -306,6 +331,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 // 将该client从注册表中删除，返回这个被删除的lease
                 leaseToCancel = gMap.remove(id);
             }
+            // 不管这个队列
             recentCanceledQueue.add(new Pair<Long, String>(System.currentTimeMillis(), appName + "(" + id + ")"));
             // 将该client的overriddenStatus从缓存map中删除
             InstanceStatus instanceStatus = overriddenInstanceStatusMap.remove(id);
@@ -326,7 +352,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 if (instanceInfo != null) {
                     // 记录本次操作类型
                     instanceInfo.setActionType(ActionType.DELETED);
-                    // 将本次操作记录到“最近更新队列”
+                    // do 将本次操作记录到“最近更新队列”
                     recentlyChangedQueue.add(new RecentlyChangedItem(leaseToCancel));
                     instanceInfo.setLastUpdatedTimestamp();
                     vip = instanceInfo.getVIPAddress();
@@ -355,8 +381,11 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
      * replication.
      *
      * @see com.netflix.eureka.lease.LeaseManager#renew(java.lang.String, java.lang.String, boolean)
+     *
+     * do client只有 up 和 outOfService 状态下才会续约，down 和 unknwon不会续约
      */
     public boolean renew(String appName, String id, boolean isReplication) {
+        // 发现续约操作里面没有锁
         RENEW.increment(isReplication);
         Map<String, Lease<InstanceInfo>> gMap = registry.get(appName);
         Lease<InstanceInfo> leaseToRenew = null;
@@ -368,9 +397,14 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             logger.warn("DS: Registry: lease doesn't exist, registering resource: {} - {}", appName, id);
             return false;
         } else {
+            // 注册表里面的
             InstanceInfo instanceInfo = leaseToRenew.getHolder();
             if (instanceInfo != null) {
                 // touchASGCache(instanceInfo.getASGName());
+                // instanceInfo和leaseToRenew来自于注册表，这个函数负责重新计算当前请求的client的新的status
+                // 续约时，由于getOverriddenInstanceStatus传入的两个参数都是注册表中的结果，因此里面的规则链为
+                // DownOrStartingRule， OverrideExistsRule, LeaseExistsRule
+                // 不可能到 AlwaysMatchInstanceStatusRule
                 InstanceStatus overriddenInstanceStatus = this.getOverriddenInstanceStatus(
                         instanceInfo, leaseToRenew, isReplication);
                 if (overriddenInstanceStatus == InstanceStatus.UNKNOWN) {
@@ -379,6 +413,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                     RENEW_NOT_FOUND.increment(isReplication);
                     return false;
                 }
+                // 计算后的状态和注册表中的状态不一样，则修改注册表中的状态
                 if (!instanceInfo.getStatus().equals(overriddenInstanceStatus)) {
                     logger.info(
                             "The instance status {} is different from overridden instance status {} for instance {}. "
@@ -434,11 +469,14 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
      *
      * @param appName the application name of the instance.
      * @param id the unique identifier of the instance.
-     * @param overriddenStatus overridden status if any.
+     * @param overriddenStatus overridden status if any. 其他Server传来的
      */
     @Override
     public void storeOverriddenStatusIfRequired(String appName, String id, InstanceStatus overriddenStatus) {
         InstanceStatus instanceStatus = overriddenInstanceStatusMap.get(id);
+        // 外来的和本地的overriddenStatus不相同，将外来的放到本地
+        // 这里为什么只更新overriddenStatus呢？因为overriddenStatus很重要，client究竟能不能服务发现provider，
+        // 就取决于provider的overriddenStatus的计算结果，所以这里Server之间同步了overriddenStatus
         if ((instanceStatus == null) || (!overriddenStatus.equals(instanceStatus))) {
             // We might not have the overridden status if the server got
             // restarted -this will help us maintain the overridden state
@@ -548,6 +586,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             if (lease == null) {
                 return false;
             } else {
+                // 删除请求为啥是续约呢？因为任何请求都算作续约（表示你还活的嘛）
                 lease.renew();
                 InstanceInfo info = lease.getHolder();
 
@@ -561,8 +600,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 InstanceStatus currentOverride = overriddenInstanceStatusMap.remove(id);
                 if (currentOverride != null && info != null) {
                     // 修改注册表中该client的overriddenStatus为UNKNOWN
+                    // instanceInfo的overriddenStatus默认为UNKNOWN，删掉，则表明回到默认值了
                     info.setOverriddenStatus(InstanceStatus.UNKNOWN);
-                    // 修改注册表中该client的status为UNKNOWN
+                    // 修改注册表中该client的status为UNKNOWN，表明不能被服务发现了
                     info.setStatusWithoutDirty(newStatus);
                     long replicaDirtyTimestamp = 0;
                     if (lastDirtyTimestamp != null) {
@@ -1094,10 +1134,12 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         if (leaseMap != null) {
             lease = leaseMap.get(id);
         }
+        // isLeaseExpirationEnabled：lease过期开启 = 自我保护机制开启
         if (lease != null
                 && (!isLeaseExpirationEnabled() || !lease.isExpired())) {
-            return decorateInstanceInfo(lease);
+            return decorateInstanceInfo(lease); // 把lease包装成 instanceInfo
         } else if (includeRemoteRegions) {
+            // lease中如果没有，则从远程region中获取，找到了，立刻返回
             for (RemoteRegionRegistry remoteRegistry : this.regionNameVSRemoteRegistry.values()) {
                 Application application = remoteRegistry.getApplication(appName);
                 if (application != null) {
@@ -1168,6 +1210,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     }
 
     private InstanceInfo decorateInstanceInfo(Lease<InstanceInfo> lease) {
+        // info为注册表中的instanceInfo
         InstanceInfo info = lease.getHolder();
 
         // client app settings
@@ -1247,6 +1290,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     }
 
     protected void updateRenewsPerMinThreshold() {
+        // 客户端数量 * (60 / Server期望client的心跳间隔，默认30秒) * 自我保护机制开启的阈值，默认是0.85
+        // = 客户端数量 * (每个客户端每分钟发送的心跳个数) * 自我保护开启的阈值
+        // = 当前Server开启自我保护机制的每分钟最小心跳数量
         this.numberOfRenewsPerMinThreshold = (int) (this.expectedNumberOfClientsSendingRenews
                 * (60.0 / serverConfig.getExpectedClientRenewalIntervalSeconds())
                 * serverConfig.getRenewalPercentThreshold());
@@ -1401,6 +1447,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     protected InstanceInfo.InstanceStatus getOverriddenInstanceStatus(InstanceInfo r,
                                                                     Lease<InstanceInfo> existingLease,
                                                                     boolean isReplication) {
+        // getInstanceInfoOverrideRule(): PeerAwareInstanceRegistryImpl
         InstanceStatusOverrideRule rule = getInstanceInfoOverrideRule();
         logger.debug("Processing override status using rule: {}", rule);
         return rule.apply(r, existingLease, isReplication).status();

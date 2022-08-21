@@ -131,13 +131,13 @@ public class InstanceInfo {
     private volatile int countryId = DEFAULT_COUNTRY_ID; // Defaults to US
     private volatile boolean isSecurePortEnabled = false;
     private volatile boolean isUnsecurePortEnabled = true;
-    private volatile DataCenterInfo dataCenterInfo;
+    private volatile DataCenterInfo dataCenterInfo; // 将instanceInfo的信息备份在另外一台服务器，叫做数据中心（一般不使用）
     private volatile String hostName;
     private volatile InstanceStatus status = InstanceStatus.UP;
     private volatile InstanceStatus overriddenStatus = InstanceStatus.UNKNOWN;
     @XStreamOmitField
     private volatile boolean isInstanceInfoDirty = false;
-    private volatile LeaseInfo leaseInfo;
+    private volatile LeaseInfo leaseInfo; // 续约信息
     @Auto
     private volatile Boolean isCoordinatingDiscoveryServer = Boolean.FALSE;
     @XStreamAlias("metadata")
@@ -145,7 +145,7 @@ public class InstanceInfo {
     @Auto
     private volatile Long lastUpdatedTimestamp; // 微服务信息在服务端最后一次被修改的时间
     @Auto
-    private volatile Long lastDirtyTimestamp; // 微服务信息在客户端最后一次被修改的时间
+    private volatile Long lastDirtyTimestamp; // 微服务信息在客户端最后一次被修改的时间，为什么叫dirty，因为还没来得及和服务端同步，所以是脏数据
     @Auto
     private volatile ActionType actionType;
     @Auto
@@ -1239,6 +1239,7 @@ public class InstanceInfo {
      * the discovery server on the next heartbeat.
      */
     public synchronized void setIsDirty() {
+        // 配置文件发生了更改时，还没来得及上报给Server, 服务端和客户端的instanceInfo数据不一样，所以是脏的
         isInstanceInfoDirty = true;
         lastDirtyTimestamp = System.currentTimeMillis();
     }
