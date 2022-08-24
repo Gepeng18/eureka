@@ -75,6 +75,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     // CircularQueues here for debugging/statistics purposes only
     private final CircularQueue<Pair<Long, String>> recentRegisteredQueue;
     private final CircularQueue<Pair<Long, String>> recentCanceledQueue;
+
+    // deltaRetentionTimer 负责recentlyChangedQueue的定时清除任务
     private ConcurrentLinkedQueue<RecentlyChangedItem> recentlyChangedQueue = new ConcurrentLinkedQueue<RecentlyChangedItem>();
 
     private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
@@ -647,7 +649,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         // We collect first all expired items, to evict them in random order. For large eviction sets,
         // if we do not that, we might wipe out whole apps before self preservation kicks in. By randomizing it,
         // the impact should be evenly distributed across all applications.
-        List<Lease<InstanceInfo>> expiredLeases = new ArrayList<>();
+        List<Lease<InstanceInfo>> expiredLeases = new ArrayList<>(); // 过期列表
         // 遍历注册表，查找所有过期的client
         for (Entry<String, Map<String, Lease<InstanceInfo>>> groupEntry : registry.entrySet()) {
             Map<String, Lease<InstanceInfo>> leaseMap = groupEntry.getValue();
@@ -670,7 +672,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         int registrySizeThreshold = (int) (registrySize * serverConfig.getRenewalPercentThreshold());
         // 计算出可以清除的边界值
         int evictionLimit = registrySize - registrySizeThreshold;
-        // 获取要清除的client的数量
+        // 获取要清除的client的数量（为了AP，万一由于网络抖动，不会导致服务被全部删除，所以策略是需要删除，但是不能全删，需要保证一定数量的存活）
         int toEvict = Math.min(expiredLeases.size(), evictionLimit);
         if (toEvict > 0) {
             logger.info("Evicting {} items (expired={}, evictionLimit={})", toEvict, expiredLeases.size(), evictionLimit);
@@ -811,14 +813,14 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         Applications apps = new Applications();
         apps.setVersion(1L);
 
-        // 获取本地注册表中的所有entry(将双层map变为applications)
+        // 第一部分：获取本地注册表中的所有entry(将本地的双层map变为applications)
         for (Entry<String, Map<String, Lease<InstanceInfo>>> entry : registry.entrySet()) {
             Application app = null;
 
             if (entry.getValue() != null) {  // 若注册表不为空，则遍历注册表
                 // 遍历注册表内层map的所有entry（这些entry中的lease来自于同一个微服务，即微服务名称相同）
                 for (Entry<String, Lease<InstanceInfo>> stringLeaseEntry : entry.getValue().entrySet()) {
-                    // 获取到当前遍历entry的value，即lease对象（可以看作是client）
+                    // 获取到当前遍历entry的value，即lease对象（可以看作是client，或者instanceInfo）
                     Lease<InstanceInfo> lease = stringLeaseEntry.getValue();
                     if (app == null) {
                         app = new Application(lease.getHolder().getAppName());
@@ -832,7 +834,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             }
         }  // end-外层for
 
-        // 获取远程Region中的所有服务(将来自于远程Region中的applications添加到这里的apps中）
+        // 第二部分：获取远程Region中的所有服务(将来自于远程Region中的applications添加到这里的apps中）
+        // 其他region发给我的就是apps（够周到）
         if (includeRemoteRegion) {
             // 遍历所有region
             for (String remoteRegion : remoteRegions) {
@@ -849,7 +852,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
                             // 根据微服务名称获取到其application
                             Application appInstanceTillNow = apps.getRegisteredApplications(application.getName());
-                            // 将这个application放入到apps
+                            // 创建一个application放入到apps
                             if (appInstanceTillNow == null) {
                                 appInstanceTillNow = new Application(application.getName());
                                 apps.addApplication(appInstanceTillNow);
@@ -1036,6 +1039,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         write.lock();   // 读操作添加了写锁
         try {
             // 遍历recentlyChangedQueue中所有的客户端信息，并写入到apps
+            // (recentlyChangedQueue 里面存储了所有最近变更的instanceInfo)
             Iterator<RecentlyChangedItem> iter = this.recentlyChangedQueue.iterator();
             logger.debug("The number of elements in the delta queue is :{}", this.recentlyChangedQueue.size());
             // 遍历recentlyChangedQueue
@@ -1058,11 +1062,12 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 // decorateInstanceInfo(lease)返回的instanceInfo实例，实际是来自于recentlyChangedQueue的实例。
                 // 若在当前方法结束后，在当前方法的返回值apps还未发送给client之前，某个lease的数据又被修改了。那么，
                 // 发送给client的这个数据就是最新的二次修改的数据。这种情况下会导致client接收到的这个增量数据中丢失了
-                // 一次修改时的情况，而这个丢失会引发client进行全量下载。为了避免这种情况的发生，使用decorateInstanceInfo()
-                // 返回的instanceInfo数据再创建一个新的instanceInfo，使当前方法返回的这个apps中的instanceInfo与
-                // recentlyChangedQueue没有关系。
+                // 一次修改时的情况，而这个丢失会引发client进行全量下载(客户端通过比较hashcode判断有数据丢失，于是全量下载)。
+                // 为了避免这种情况的发生，使用decorateInstanceInfo()返回的instanceInfo数据再创建一个新的instanceInfo，
+                // 使当前方法返回的这个apps中的instanceInfo与recentlyChangedQueue没有关系。
+                // 也就是说只返回第一次修改的内容，第二次内容如果改了，则等client第二次拉数据时，再返回给client
 
-                // 2）为什么全量下载时没有做这里的第二次创建操作？
+                // 2）为什么全量下载时没有做这里的第二次创建操作？new InstanceInfo(instanceInfo)
                 // 对于全量下载，其操作的共享集合为注册表registry，与recentlyChangedQueue无关。
                 // 若在当前方法（全量下载方法）结束后，在当前方法的返回值apps还未发送给client之前，
                 // 某个lease的数据又被修改了。那么，发送给client的这个数据就是最新的二次修改的数据，
@@ -1072,7 +1077,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 app.addInstance(new InstanceInfo(decorateInstanceInfo(lease)));
             }
 
-            // 处理远程Region中的服务
+            // 处理远程Region中的服务，和全量一样的逻辑
             if (includeRemoteRegion) {
                 for (String remoteRegion : remoteRegions) {
                     RemoteRegionRegistry remoteRegistry = regionNameVSRemoteRegistry.get(remoteRegion);
@@ -1324,6 +1329,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         }
         // 将新的清除任务添加到ref对象，并开启这个定时任务
         evictionTaskRef.set(new EvictionTask());
+        // 比如一个任务每5分钟执行一次，第一个任务0分钟时执行，第二个任务应该5分钟时执行，
+        // 但第一个任务运行了8分钟才结束，所以第二个任务第8分钟才开始执行
         evictionTimer.schedule(evictionTaskRef.get(),
                 serverConfig.getEvictionIntervalTimerInMs(),
                 serverConfig.getEvictionIntervalTimerInMs());
@@ -1353,6 +1360,12 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         public void run() {
             try {
                 // 计算 补偿时间
+                // 假设第5秒清除程序开始执行，于是清除[0, 5s]的续约过期实例，第7秒清除结束。
+                // 如果第10秒再次开始清除，于是清除[5s, 10s]的续约过期实例，第12秒清除结束。
+                // 但是异常情况，
+                // 如果清除需要用时6s，那第5秒清除程序开始执行，于是清除[0, 5s]的续约过期实例，第11秒清除结束。
+                // 按理说应该在第10s开始清除[5s,10s]的过期实例，但由于前面的清除任务尚未完成，所以本次清除操作不能开始
+                // 第11s时开始清除[5s,11s]中过期实例，其中多出的那1s就是补偿时间
                 long compensationTimeMs = getCompensationTimeMs();
                 logger.info("Running the evict task with compensationTime {}ms", compensationTimeMs);
                 // 开始清除
@@ -1385,6 +1398,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         }
 
         long getCurrentTimeNano() {  // for testing
+            // 非常耗费计算机性能
             return System.nanoTime();
         }
 
@@ -1460,10 +1474,10 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             // 即最新添加的元素一定是放在队尾的（时间最大），最老添加的元素一定是放在队首的（时间最小）
             @Override
             public void run() {
-                // 迭代recentCanceledQueue队列
+                // 迭代recentlyChangedQueue队列
                 Iterator<RecentlyChangedItem> it = recentlyChangedQueue.iterator();
                 // it.next().getLastUpdateTime() 为队列元素中当前client被最后修改的时间戳
-                // serverConfig.getRetentionTimeInMSInDeltaQueue() recentCanceledQueue队列中的recent时间
+                // serverConfig.getRetentionTimeInMSInDeltaQueue(): recentlyChangedQueue队列中的recent时间（存活多久）
                 while (it.hasNext()) {
                     // 将if()中的条件变化一下形式：
                     //  <=> it.next().getLastUpdateTime() < System.currentTimeMillis() - serverConfig.getRetentionTimeInMSInDeltaQueue()

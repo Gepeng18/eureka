@@ -425,9 +425,11 @@ public class ResponseCacheImpl implements ResponseCache {
 
                     if (ALL_APPS.equals(key.getName())) {   // 处理全量下载
                         if (isRemoteRegionRequested) {
+                            // 包含远程region
                             tracer = serializeAllAppsWithRemoteRegionTimer.start();
                             payload = getPayLoad(key, registry.getApplicationsFromMultipleRegions(key.getRegions()));
                         } else {
+                            // 不包含远程region
                             tracer = serializeAllAppsTimer.start();
                             payload = getPayLoad(key, registry.getApplications());
                         }

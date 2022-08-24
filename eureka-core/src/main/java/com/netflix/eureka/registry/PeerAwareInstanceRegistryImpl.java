@@ -473,13 +473,13 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     // 返回false：表示client不会过期
     @Override
     public boolean isLeaseExpirationEnabled() {
-        // 只要自我保护机制关闭了，client就会过期，直接返回true
+        // do 只要自我保护机制关闭了，client就会过期，直接返回true
+        // 自我保护机制默认是开启的，如果关闭自我保护机制,即不用保护server了,即只要有过期的client,立马清除,不用再考虑可用性问题了
         if (!isSelfPreservationModeEnabled()) {
             // The self preservation mode is disabled, hence allowing the instances to expire.
             return true;
         }
-        // 代码走到这里，说明自我保护机制是开启的。那么此时的client是否会过期，
-        // 就取决于下面的逻辑
+        // 代码走到这里，说明自我保护机制是开启的。那么此时的client是否会过期，就取决于下面的逻辑
         // numberOfRenewsPerMinThreshold 是开启client过期模式的阈值，是平均每分钟收到的续约数量。
         // 若最后一分钟收到的续约数量 大于 这个阈值，说明现在的client数量很多，不用考虑 可用性 问题，
         // 只要出现过期的client，直接干掉。若小于这个阈值，则开启保护，为了保证可用性，出现过期client，
